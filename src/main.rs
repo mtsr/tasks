@@ -66,7 +66,7 @@ fn main() {
 
     // create some tasks
     for id in 0..10 {
-        task_sender.send(Task { id: id });
+        task_sender.send(Task { id: id }).ok().expect("Sending should be OK");
     }
 
     // temporary list of workers
@@ -76,7 +76,7 @@ fn main() {
     // so that each thread gets all stealers
     for _ in 0..NUM_THREADS {
         // create worker/stealer deque
-        let (mut worker, mut stealer) = deque_pool.deque();
+        let (worker, stealer) = deque_pool.deque();
         // and store stealer
         stealers.push(stealer);
 
