@@ -10,14 +10,8 @@ use deque::BufferPool;
 
 const NUM_THREADS: u32 = 2;
 
-#[derive(Debug)]
-enum SchedulerMessage {
-    Done,
-}
-
 struct Scheduler {
     num: u32,
-    sender: Sender<SchedulerMessage>,
     worker: deque::Worker<Task>,
     task_receiver: Arc<Mutex<Receiver<Task>>>,
 }
@@ -45,8 +39,6 @@ impl Scheduler {
                 }
             }
         }
-
-        self.sender.send(SchedulerMessage::Done).ok();
     }
 }
 
@@ -73,9 +65,6 @@ fn main() {
     // make Send + Sync receiver
     let task_receiver = Arc::new(Mutex::new(task_receiver));
 
-    // channel for receiving info from schedulers
-    let (scheduler_sender, scheduler_receiver) = channel();
-
     for num in 0..NUM_THREADS {
         let (mut worker, mut stealer) = deque_pool.deque();
         stealers.push(stealer);
@@ -85,7 +74,6 @@ fn main() {
 
         let mut scheduler = Scheduler {
             num: num,
-            sender: scheduler_sender.clone(),
             worker: worker,
             task_receiver: task_receiver.clone(),
         };
@@ -95,18 +83,10 @@ fn main() {
         });
     }
 
-    // drop sender, so all senders are owned by the
-    // threadpool and receiver will be done when
-    // threadpool is done
-    drop(scheduler_sender);
-
     // for debugging purposes drop task_sender so
     // that threads end
     drop(task_sender);
 
-    while let Ok(msg) = scheduler_receiver.recv() {
-        println!("{:?}", msg);
-    }
 }
 
 #[test]
