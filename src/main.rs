@@ -2,7 +2,7 @@ extern crate threadpool;
 extern crate deque;
 
 use std::sync::mpsc::{ channel };
-use std::sync::mpsc::{ Sender, Receiver };
+use std::sync::mpsc::{ Receiver };
 use std::sync::{ Arc, Mutex };
 
 use threadpool::{ ScopedPool };
@@ -20,11 +20,12 @@ impl Scheduler {
     fn run(&mut self) {
 
         loop {
+            // finish own queue first
             while let Some(task) = self.worker.pop() {
                 println!("thread {}: {:?}", self.num, task);
             };
 
-            // only lock long enough to receive a job
+            // only lock long enough to receive a job from shared queue
             let msg = {
                 let lock = self.task_receiver.lock().unwrap();
                 lock.recv()
@@ -34,7 +35,8 @@ impl Scheduler {
                 Ok(task) => {
                     println!("thread {}: {:?}", self.num, task);
                 }
-                Err(err) => {
+                Err(_) => {
+                    // no more tasks in the queue (sender dropped)
                     break;
                 }
             }
@@ -48,9 +50,6 @@ struct Task {
 }
 
 fn main() {
-    // debugger task_id
-    let mut task_id: u32 = 0;
-
     // create pool with 1 thread per core
     let threadpool = ScopedPool::new(NUM_THREADS);
 
@@ -65,23 +64,46 @@ fn main() {
     // make Send + Sync receiver
     let task_receiver = Arc::new(Mutex::new(task_receiver));
 
-    for num in 0..NUM_THREADS {
+    // create some tasks
+    for id in 0..10 {
+        task_sender.send(Task { id: id });
+    }
+
+    // temporary list of workers
+    let mut workers = Vec::new();
+
+    // create workers/stealers all at once
+    // so that each thread gets all stealers
+    for _ in 0..NUM_THREADS {
+        // create worker/stealer deque
         let (mut worker, mut stealer) = deque_pool.deque();
+        // and store stealer
         stealers.push(stealer);
 
-        task_sender.send(Task { id: task_id });
-        task_id += 1;
+        // add worker to temporary list
+        workers.push(worker);
+    }
 
+    // launch one scheduler per thread
+    for num in 0..NUM_THREADS {
+        // create scheduler for thread
         let mut scheduler = Scheduler {
             num: num,
-            worker: worker,
+            // take some worker from temporary list
+            // don't care about order
+            worker: workers.pop().expect("One worker per thread"),
+            // clone shared central queue
             task_receiver: task_receiver.clone(),
         };
 
+        // launch scheduler
         threadpool.execute(move|| {
             scheduler.run();
         });
     }
+
+    // drop temporary list of workers
+    drop(workers);
 
     // for debugging purposes drop task_sender so
     // that threads end
