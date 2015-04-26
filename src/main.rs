@@ -2,7 +2,7 @@ extern crate threadpool;
 extern crate deque;
 extern crate coroutine;
 
-use std::sync::mpsc::{ Receiver, channel };
+use std::sync::mpsc::{ Sender, SendError, Receiver, RecvError, channel };
 use std::sync::{ Arc, Mutex };
 
 use threadpool::{ ScopedPool };
@@ -12,16 +12,46 @@ use coroutine::coroutine::State;
 
 const NUM_THREADS: u32 = 2;
 
+enum SchedulerMessage {
+    Task(Task),
+    Done,
+}
+
+#[derive(Clone)]
+struct SchedulerChannel {
+    sender: Sender<SchedulerMessage>,
+    receiver: Arc<Mutex<Receiver<SchedulerMessage>>>,
+}
+
+impl SchedulerChannel {
+    fn new() -> SchedulerChannel {
+        let (sender, receiver) = channel();
+        SchedulerChannel {
+            sender: sender,
+            receiver: Arc::new(Mutex::new(receiver)),
+        }
+    }
+
+    fn send(&self, msg: SchedulerMessage) -> Result<(), SendError<SchedulerMessage>> {
+        self.sender.send(msg)
+    }
+
+    fn recv(&self) -> Result<SchedulerMessage, RecvError> {
+        let lock = self.receiver.lock().unwrap();
+        lock.recv()
+    }
+}
+
 struct Scheduler {
     num: u32,
-    task_receiver: Arc<Mutex<Receiver<Task>>>,
+    channel: SchedulerChannel,
 }
 
 impl Scheduler {
-    fn new(num: u32, task_receiver: Arc<Mutex<Receiver<Task>>>) -> Scheduler {
+    fn new(num: u32, channel: SchedulerChannel) -> Scheduler {
         Scheduler {
             num: num,
-            task_receiver: task_receiver,
+            channel: channel,
         }
     }
 
@@ -30,13 +60,20 @@ impl Scheduler {
         loop {
             // only lock long enough to receive a job from shared queue
             let msg = {
-                let lock = self.task_receiver.lock().unwrap();
+                let lock = self.channel.receiver.lock().unwrap();
                 lock.recv()
             };
 
             match msg {
-                Ok(task) => {
-                    self.spawn(task);
+                Ok(msg) => {
+                    match msg {
+                        SchedulerMessage::Task(task) => {
+                            self.spawn(task);
+                        }
+                        Done => {
+                            break;
+                        }
+                    }
                 }
                 Err(_) => {
                     // no more tasks in the queue (sender dropped)
@@ -87,14 +124,17 @@ fn main() {
     // create pool with 1 thread per core
     let threadpool = ScopedPool::new(NUM_THREADS);
 
+    // TODO priorities
     // channel for mpmc queue
-    let (task_sender, task_receiver) = channel();
-    // make Send + Sync receiver
-    let task_receiver = Arc::new(Mutex::new(task_receiver));
+    let channel = SchedulerChannel::new();
 
     // create some tasks
     for id in 0..10 {
-        task_sender.send(Task { id: id }).ok().expect("Sending should be OK");
+        channel.send(SchedulerMessage::Task(Task { id: id })).ok().expect("Sending should be OK");
+    }
+
+    for _ in 0..NUM_THREADS {
+        channel.send(SchedulerMessage::Done);
     }
 
     // launch one scheduler per thread
@@ -103,7 +143,7 @@ fn main() {
         let mut scheduler = Scheduler::new(
             num,
             // clone shared central queue
-            task_receiver.clone(),
+            channel.clone(),
         );
 
         // launch scheduler
@@ -111,11 +151,6 @@ fn main() {
             scheduler.run();
         });
     }
-
-    // for debugging purposes drop task_sender so
-    // that threads end
-    drop(task_sender);
-
 }
 
 #[test]
