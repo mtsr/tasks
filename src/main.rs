@@ -56,27 +56,17 @@ impl Scheduler {
     }
 
     fn run(&mut self) {
-
-        loop {
-            // only lock long enough to receive a job from shared queue
-            let msg = {
-                let lock = self.channel.receiver.lock().unwrap();
-                lock.recv()
-            };
-
+        // until all senders hang up
+        while let Ok(msg) = {
+            let lock = self.channel.receiver.lock().unwrap();
+            lock.recv()
+        } {
             match msg {
-                Ok(msg) => {
-                    match msg {
-                        SchedulerMessage::Task(task) => {
-                            self.spawn(task);
-                        }
-                        Done => {
-                            break;
-                        }
-                    }
+                SchedulerMessage::Task(task) => {
+                    self.spawn(task);
                 }
-                Err(_) => {
-                    // no more tasks in the queue (sender dropped)
+                // or we get the message Done
+                SchedulerMessage::Done => {
                     break;
                 }
             }
@@ -134,7 +124,7 @@ fn main() {
     }
 
     for _ in 0..NUM_THREADS {
-        channel.send(SchedulerMessage::Done);
+        channel.send(SchedulerMessage::Done).ok().expect("Sending should be OK");
     }
 
     // launch one scheduler per thread
