@@ -33,7 +33,11 @@ impl<F> Scheduler<F> where F: FnOnce() -> () + Send + 'static {
         // until all senders hang up
         while let Ok(task) = {
             let lock = self.receiver.lock().unwrap();
-            lock.recv()
+            // TODO FIXME temporary fix to have threads end
+            // needs reworking so that if the queue is empty
+            // right now, but a running task will produce more
+            // tasks, this thread doesn't exit
+            lock.try_recv()
         } {
             task.run(&self);
         }
