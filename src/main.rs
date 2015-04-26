@@ -1,28 +1,40 @@
 extern crate threadpool;
 extern crate deque;
+extern crate coroutine;
 
 use std::sync::mpsc::{ channel };
 use std::sync::mpsc::{ Receiver };
 use std::sync::{ Arc, Mutex };
 
 use threadpool::{ ScopedPool };
-use deque::BufferPool;
+use deque::{ BufferPool };
+
+use coroutine::{ Coroutine, sched };
+use coroutine::coroutine::State;
 
 const NUM_THREADS: u32 = 2;
 
 struct Scheduler {
     num: u32,
-    worker: deque::Worker<Task>,
+    ready_queue: deque::Worker<Task>,
     task_receiver: Arc<Mutex<Receiver<Task>>>,
 }
 
 impl Scheduler {
+    fn new(num: u32, ready_queue: deque::Worker<Task>, task_receiver: Arc<Mutex<Receiver<Task>>>) -> Scheduler {
+        Scheduler {
+            num: num,
+            ready_queue: ready_queue,
+            task_receiver: task_receiver,
+        }
+    }
+
     fn run(&mut self) {
 
         loop {
             // finish own queue first
-            while let Some(task) = self.worker.pop() {
-                println!("thread {}: {:?}", self.num, task);
+            while let Some(task) = self.ready_queue.pop() {
+                self.spawn(task);
             };
 
             // only lock long enough to receive a job from shared queue
@@ -33,7 +45,7 @@ impl Scheduler {
 
             match msg {
                 Ok(task) => {
-                    println!("thread {}: {:?}", self.num, task);
+                    self.spawn(task);
                 }
                 Err(_) => {
                     // no more tasks in the queue (sender dropped)
@@ -41,6 +53,37 @@ impl Scheduler {
                 }
             }
         }
+    }
+
+    fn spawn(&mut self, task: Task) {
+        let num = self.num;
+        // TODO pool/reuse Coroutines (although stacks are already pooled)
+        let handle = Coroutine::spawn(move || {
+            sched();
+            println!("thread {}: {:?}", num, task);
+        });
+
+        // println!("{:?}", handle.state());
+
+        // match handle.state() {
+        //     State::Normal => {
+
+        //     }
+        //     State::Suspended => {
+
+        //     }
+        //     State::Running => {
+                
+        //     }
+        //     State::Finished => {
+                
+        //     }
+        //     State::Panicked => {
+                
+        //     }
+        // }
+
+        handle.join().ok().unwrap();
     }
 }
 
@@ -87,14 +130,14 @@ fn main() {
     // launch one scheduler per thread
     for num in 0..NUM_THREADS {
         // create scheduler for thread
-        let mut scheduler = Scheduler {
-            num: num,
+        let mut scheduler = Scheduler::new(
+            num,
             // take some worker from temporary list
             // don't care about order
-            worker: workers.pop().expect("One worker per thread"),
+            workers.pop().expect("One worker per thread"),
             // clone shared central queue
-            task_receiver: task_receiver.clone(),
-        };
+            task_receiver.clone(),
+        );
 
         // launch scheduler
         threadpool.execute(move|| {
