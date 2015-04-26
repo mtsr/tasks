@@ -13,19 +13,14 @@ use coroutine::coroutine::{ Handle, State };
 
 const NUM_THREADS: u32 = 2;
 
-enum SchedulerMessage<F> {
-    Task(Task<F>),
-    Done,
-}
-
 struct Scheduler<F> {
     id: u32,
-    sender: Sender<SchedulerMessage<F>>,
-    receiver: Arc<Mutex<Receiver<SchedulerMessage<F>>>>
+    sender: Sender<Task<F>>,
+    receiver: Arc<Mutex<Receiver<Task<F>>>>
 }
 
 impl<F> Scheduler<F> where F: FnOnce() -> () + Send + 'static {
-    fn new(id: u32, sender: Sender<SchedulerMessage<F>>, receiver: Arc<Mutex<Receiver<SchedulerMessage<F>>>>) -> Scheduler<F> {
+    fn new(id: u32, sender: Sender<Task<F>>, receiver: Arc<Mutex<Receiver<Task<F>>>>) -> Scheduler<F> {
         Scheduler {
             id: id,
             sender: sender,
@@ -36,18 +31,11 @@ impl<F> Scheduler<F> where F: FnOnce() -> () + Send + 'static {
     fn run(mut self) {
         println!("Scheduler {} run()", self.id);
         // until all senders hang up
-        while let Ok(msg) = {
+        while let Ok(task) = {
             let lock = self.receiver.lock().unwrap();
             lock.recv()
         } {
-            match msg {
-                SchedulerMessage::Task(task) => {
-                    task.run(&self);
-                }
-                // or we get the message Done
-                SchedulerMessage::Done => {
-                }
-            }
+            task.run(&self);
         }
     }
 }
@@ -69,22 +57,20 @@ impl<F> Task<F> where F: FnOnce() -> () + Send + 'static {
     }
 
     fn run(mut self, scheduler: &Scheduler<F>) {
-        println!("Task {} run()", self.id);
-
         match self.coroutine {
             Some(coroutine) => {
-                println!("Task {} resuming", self.id);
-                coroutine.resume();
+                println!("Task {} on Scheduler {}: resuming", self.id, scheduler.id);
+                coroutine.resume().ok().unwrap();
             }
             None => {
-                println!("Task {} starting", self.id);
-                let mut work = self.work.take();
+                println!("Task {} on Scheduler {}: starting", self.id, scheduler.id);
+                let work = self.work.take();
 
                 // TODO pool/reuse Coroutines (although stacks are already pooled)
                 let coroutine = Coroutine::spawn(move|| (work.unwrap())());
 
                 // actually start processing on coroutine
-                coroutine.resume();
+                coroutine.resume().ok().unwrap();
 
                 match coroutine.state() {
                     State::Normal => {
@@ -92,15 +78,18 @@ impl<F> Task<F> where F: FnOnce() -> () + Send + 'static {
                         unimplemented!();
                     }
                     State::Suspended => {
-                        println!("Putting suspended task {} back on the queue", self.id);
+                        // send this task to the back of the queue
+                        // Note that the back of the queue means might not be very efficient,
+                        // since it could mean accumulating lots of coroutines
                         self.coroutine = Some(coroutine);
-                        scheduler.sender.send(SchedulerMessage::Task(self)).ok().unwrap();
+                        scheduler.sender.send(self).ok().unwrap();
                     }
                     State::Running => {
                         println!("Running");
                         unimplemented!();
                     }
                     State::Finished => {
+                        // No need to do anything here
                     }
                     State::Panicked => {
                         println!("Panicked");
@@ -123,16 +112,16 @@ fn main() {
 
     // create some tasks
     for id in 0..10 {
-        sender.send(SchedulerMessage::Task(Task::new(id, move|| {
+        sender.send(Task::new(id, move|| {
             sched();
             println!("Task {}: done", id);
-        }))).ok().expect("Sending should be OK");
+        })).ok().expect("Sending should be OK");
     }
 
     // launch one scheduler per thread
     for num in 0..NUM_THREADS {
         // create scheduler for thread
-        let mut scheduler = Scheduler::new(
+        let scheduler = Scheduler::new(
             num,
             // clone shared central queue
             sender.clone(),
