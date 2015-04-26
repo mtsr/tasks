@@ -2,7 +2,7 @@ extern crate threadpool;
 extern crate deque;
 extern crate coroutine;
 
-use std::sync::mpsc::{ Sender, Receiver, channel };
+use std::sync::mpsc::{ Sender, SendError, Receiver, channel };
 use std::sync::{ Arc, Mutex };
 
 use threadpool::{ ScopedPool };
@@ -10,8 +10,6 @@ use threadpool::{ ScopedPool };
 #[allow(unused_imports)]
 use coroutine::{ Coroutine, sched };
 use coroutine::coroutine::{ Handle, State };
-
-const NUM_THREADS: u32 = 2;
 
 struct Scheduler<F> {
     id: u32,
@@ -63,11 +61,11 @@ impl<F> Task<F> where F: FnOnce() -> () + Send + 'static {
     fn run(mut self, scheduler: &Scheduler<F>) {
         match self.coroutine {
             Some(coroutine) => {
-                println!("Task {} on Scheduler {}: resuming", self.id, scheduler.id);
+                // println!("Task {} on Scheduler {}: resuming", self.id, scheduler.id);
                 coroutine.resume().ok().unwrap();
             }
             None => {
-                println!("Task {} on Scheduler {}: starting", self.id, scheduler.id);
+                // println!("Task {} on Scheduler {}: starting", self.id, scheduler.id);
                 let work = self.work.take();
 
                 // TODO pool/reuse Coroutines (although stacks are already pooled)
@@ -105,37 +103,56 @@ impl<F> Task<F> where F: FnOnce() -> () + Send + 'static {
     }
 }
 
-fn main() {
-    // create pool with 1 thread per core
-    let threadpool = ScopedPool::new(NUM_THREADS);
+struct Pool<'a, F> {
+    threadpool: ScopedPool<'a>,
+    sender: Sender<Task<F>>,
+}
 
-    // TODO priorities
-    // channel for mpmc queue
-    let (sender, receiver) = channel();
-    let receiver = Arc::new(Mutex::new(receiver));
+impl<'a, F> Pool<'a, F> where F: FnOnce() -> () + Send + 'static {
+    fn new(num_threads: u32) -> Pool<'a, F> {
+        let (sender, receiver) = channel();
+        let receiver = Arc::new(Mutex::new(receiver));
+
+        let threadpool = ScopedPool::new(num_threads);
+
+        // launch one scheduler per thread
+        for num in 0..NUM_THREADS {
+            // create scheduler for thread
+            let scheduler = Scheduler::new(
+                num,
+                // clone shared central queue
+                sender.clone(),
+                receiver.clone(),
+            );
+
+            // launch scheduler
+            threadpool.execute(move|| {
+                scheduler.run();
+            });
+        }
+
+        Pool {
+            threadpool: threadpool,
+            sender: sender,
+        }
+    }
+
+    fn execute(&mut self, task: Task<F>) -> Result<(), SendError<Task<F>>> {
+        self.sender.send(task)
+    }
+}
+
+const NUM_THREADS: u32 = 4;
+
+fn main() {
+    let mut pool = Pool::new(NUM_THREADS);
 
     // create some tasks
     for id in 0..10 {
-        sender.send(Task::new(id, move|| {
-            sched();
+        pool.execute(Task::new(id, move|| {
+            // sched();
             println!("Task {}: done", id);
         })).ok().expect("Sending should be OK");
-    }
-
-    // launch one scheduler per thread
-    for num in 0..NUM_THREADS {
-        // create scheduler for thread
-        let scheduler = Scheduler::new(
-            num,
-            // clone shared central queue
-            sender.clone(),
-            receiver.clone(),
-        );
-
-        // launch scheduler
-        threadpool.execute(move|| {
-            scheduler.run();
-        });
     }
 }
 
