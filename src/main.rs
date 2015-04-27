@@ -74,11 +74,20 @@ impl<F> Task<F> where F: FnOnce() -> () + Send + 'static {
                 // actually start processing on coroutine
                 coroutine.resume().ok().unwrap();
 
+                // when control returns to the scheduler
+                // check what needs to happen to the task
                 match coroutine.state() {
+                    // coroutine waiting for child coroutines
+                    // shouldn't occur with the scheduler
+                    // and coroutine running on the same thread
                     State::Normal => {
                         println!("Normal");
                         unimplemented!();
                     }
+                    // coroutine suspended
+                    // treat this as just yielding?
+                    // or treat this as waiting for child tasks?
+                    // or distinguish these two somehow
                     State::Suspended => {
                         // send this task to the back of the queue
                         // Note that the back of the queue means might not be very efficient,
@@ -86,13 +95,19 @@ impl<F> Task<F> where F: FnOnce() -> () + Send + 'static {
                         self.coroutine = Some(coroutine);
                         scheduler.sender.send(self).ok().unwrap();
                     }
+                    // coroutine running
+                    // shouldn't occur with the scheduler
+                    // and coroutine running on the same thread
                     State::Running => {
                         println!("Running");
                         unimplemented!();
                     }
+                    // coroutine is done, let control pass back
+                    // to the scheduler
                     State::Finished => {
                         // No need to do anything here
                     }
+                    // probably fine to panic here for now
                     State::Panicked => {
                         println!("Panicked");
                         unimplemented!();
