@@ -1,5 +1,4 @@
 extern crate threadpool;
-extern crate deque;
 extern crate coroutine;
 
 use std::sync::mpsc::{ Sender, SendError, Receiver, channel };
