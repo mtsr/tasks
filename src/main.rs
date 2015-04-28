@@ -16,7 +16,7 @@ struct Scheduler<F> {
     receiver: Arc<Mutex<Receiver<Task<F>>>>
 }
 
-impl<F> Scheduler<F> where F: FnOnce() -> () + Send + 'static {
+impl<F> Scheduler<F> where F: FnOnce() + Send + 'static {
     fn new(id: u32, sender: Sender<Task<F>>, receiver: Arc<Mutex<Receiver<Task<F>>>>) -> Scheduler<F> {
         Scheduler {
             id: id,
@@ -48,7 +48,7 @@ struct Task<F> {
     work: Option<F>,
 }
 
-impl<F> Task<F> where F: FnOnce() -> () + Send + 'static {
+impl<F> Task<F> where F: FnOnce() + Send + 'static {
     fn new(id: u32, work: F) -> Task<F> {
         Task {
             id: id,
@@ -117,20 +117,20 @@ impl<F> Task<F> where F: FnOnce() -> () + Send + 'static {
     }
 }
 
-struct Pool<'a, F> {
+struct FiberPool<'a, F> {
     threadpool: ScopedPool<'a>,
     sender: Sender<Task<F>>,
 }
 
-impl<'a, F> Pool<'a, F> where F: FnOnce() -> () + Send + 'static {
-    fn new(num_threads: u32) -> Pool<'a, F> {
+impl<'a, F> FiberPool<'a, F> where F: FnOnce() + Send + 'static {
+    fn new(num_threads: u32) -> FiberPool<'a, F> {
         let (sender, receiver) = channel();
         let receiver = Arc::new(Mutex::new(receiver));
 
         let threadpool = ScopedPool::new(num_threads);
 
         // launch one scheduler per thread
-        for num in 0..NUM_THREADS {
+        for num in 0..num_threads {
             // create scheduler for thread
             let scheduler = Scheduler::new(
                 num,
@@ -145,7 +145,7 @@ impl<'a, F> Pool<'a, F> where F: FnOnce() -> () + Send + 'static {
             });
         }
 
-        Pool {
+        FiberPool {
             threadpool: threadpool,
             sender: sender,
         }
@@ -159,7 +159,7 @@ impl<'a, F> Pool<'a, F> where F: FnOnce() -> () + Send + 'static {
 const NUM_THREADS: u32 = 4;
 
 fn main() {
-    let mut pool = Pool::new(NUM_THREADS);
+    let mut pool = FiberPool::new(NUM_THREADS);
 
     // create some tasks
     for id in 0..10 {
