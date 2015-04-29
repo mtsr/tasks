@@ -1,6 +1,10 @@
+#![feature(core)]
 extern crate threadpool;
 extern crate coroutine;
 
+use std::cell::{ UnsafeCell };
+use std::boxed::{ FnBox };
+use std::mem::transmute;
 use std::sync::mpsc::{ Sender, SendError, Receiver, channel };
 use std::sync::{ Arc, Mutex };
 
@@ -10,65 +14,110 @@ use threadpool::{ ScopedPool };
 use coroutine::{ Coroutine, sched };
 use coroutine::coroutine::{ Handle, State };
 
-struct Scheduler<F> {
-    id: u32,
-    sender: Sender<Task<F>>,
-    receiver: Arc<Mutex<Receiver<Task<F>>>>
+struct Environment {
+    scheduler: Option<Scheduler>,
 }
 
-impl<F> Scheduler<F> where F: FnOnce() + Send + 'static {
-    fn new(id: u32, sender: Sender<Task<F>>, receiver: Arc<Mutex<Receiver<Task<F>>>>) -> Scheduler<F> {
+impl Environment {
+    fn new() -> Environment {
+        Environment {
+            scheduler: None,
+        }
+    }
+
+    fn init(scheduler: Scheduler) {
+        ENV.with(|env| {
+            let env: &mut Environment = unsafe { transmute(env.get()) };
+            env.scheduler = Some(scheduler);
+        });
+    }
+}
+
+struct Scheduler {
+    id: u32,
+    sender: Sender<Task>,
+    receiver: Arc<Mutex<Receiver<Task>>>,
+    current: Option<Task>,
+}
+
+impl Scheduler {
+    fn new(id: u32, sender: Sender<Task>, receiver: Arc<Mutex<Receiver<Task>>>) -> Scheduler {
         Scheduler {
             id: id,
             sender: sender,
             receiver: receiver,
+            current: None,
         }
     }
 
-    fn run(mut self) {
-        println!("Scheduler {} run()", self.id);
-        // until all senders hang up
-        while let Ok(task) = {
-            let lock = self.receiver.lock().unwrap();
-            // TODO FIXME temporary fix to have threads end
-            // needs reworking so that if the queue is empty
-            // right now, but a running task will produce more
-            // tasks, this thread doesn't exit
-            lock.try_recv()
-        } {
-            task.run(&self);
-        }
+    fn id() -> u32 {
+        ENV.with(|env| {
+            let env: &mut Environment = unsafe { transmute(env.get()) };
+            let scheduler = env.scheduler.as_mut().unwrap();
+
+            scheduler.id
+        })
+    }
+
+    fn start() {
+        ENV.with(|env| {
+            let env: &mut Environment = unsafe { transmute(env.get()) };
+            let scheduler = env.scheduler.as_mut().unwrap();
+
+            println!("Scheduler {} run()", scheduler.id);
+            // until all senders hang up
+            while let Ok(task) = {
+                let lock = scheduler.receiver.lock().unwrap();
+                // TODO FIXME temporary fix to have threads end
+                // needs reworking so that if the queue is empty
+                // right now, but a running task will produce more
+                // tasks, this thread doesn't exit
+                // lock.try_recv()
+                lock.recv()
+            } {
+                scheduler.current = Some(task);
+                scheduler.current.as_mut().unwrap().run();
+            }
+        });
+    }
+
+    fn schedule(task: Task) {
+        ENV.with(|env| {
+            let env: &Environment = unsafe { transmute(env.get()) };
+            let scheduler = env.scheduler.as_ref().unwrap();
+
+            scheduler.sender.send(task).ok().unwrap();
+        });
     }
 }
 
-#[derive(Debug)]
-struct Task<F> {
-    id: u32,
+thread_local!(static ENV: UnsafeCell<Environment> = UnsafeCell::new(Environment::new()));
+
+struct Task {
     coroutine: Option<Handle>,
-    work: Option<F>,
+    work: Option<Box<FnBox() + Send + 'static>>,
 }
 
-impl<F> Task<F> where F: FnOnce() + Send + 'static {
-    fn new(id: u32, work: F) -> Task<F> {
+impl Task {
+    fn new<F: FnOnce() + Send + 'static>(work: F) -> Task {
         Task {
-            id: id,
             coroutine: None,
-            work: Some(work),
+            work: Some(Box::new(work)),
         }
     }
 
-    fn run(mut self, scheduler: &Scheduler<F>) {
-        match self.coroutine {
+    fn run(&mut self) {
+        match self.coroutine.take() {
             Some(coroutine) => {
                 // println!("Task {} on Scheduler {}: resuming", self.id, scheduler.id);
                 coroutine.resume().ok().unwrap();
             }
             None => {
                 // println!("Task {} on Scheduler {}: starting", self.id, scheduler.id);
-                let work = self.work.take();
+                let work = self.work.take().unwrap();
 
                 // TODO pool/reuse Coroutines (although stacks are already pooled)
-                let coroutine = Coroutine::spawn(move|| (work.unwrap())());
+                let coroutine = Coroutine::spawn(move|| work());
 
                 // actually start processing on coroutine
                 coroutine.resume().ok().unwrap();
@@ -92,7 +141,7 @@ impl<F> Task<F> where F: FnOnce() + Send + 'static {
                         // Note that the back of the queue means might not be very efficient,
                         // since it could mean accumulating lots of coroutines
                         self.coroutine = Some(coroutine);
-                        scheduler.sender.send(self).ok().unwrap();
+                        // scheduler.sender.send(self).ok().unwrap();
                     }
                     // coroutine running
                     // shouldn't occur with the scheduler
@@ -117,13 +166,13 @@ impl<F> Task<F> where F: FnOnce() + Send + 'static {
     }
 }
 
-struct FiberPool<'a, F> {
+struct FiberPool<'a> {
     threadpool: ScopedPool<'a>,
-    sender: Sender<Task<F>>,
+    sender: Sender<Task>,
 }
 
-impl<'a, F> FiberPool<'a, F> where F: FnOnce() + Send + 'static {
-    fn new(num_threads: u32) -> FiberPool<'a, F> {
+impl<'a> FiberPool<'a> {
+    fn new(num_threads: u32) -> FiberPool<'a> {
         let (sender, receiver) = channel();
         let receiver = Arc::new(Mutex::new(receiver));
 
@@ -141,7 +190,9 @@ impl<'a, F> FiberPool<'a, F> where F: FnOnce() + Send + 'static {
 
             // launch scheduler
             threadpool.execute(move|| {
-                scheduler.run();
+                Environment::init(scheduler);
+
+                Scheduler::start();
             });
         }
 
@@ -151,7 +202,7 @@ impl<'a, F> FiberPool<'a, F> where F: FnOnce() + Send + 'static {
         }
     }
 
-    fn execute(&mut self, task: Task<F>) -> Result<(), SendError<Task<F>>> {
+    fn execute(&mut self, task: Task) -> Result<(), SendError<Task>> {
         self.sender.send(task)
     }
 }
@@ -163,9 +214,13 @@ fn main() {
 
     // create some tasks
     for id in 0..10 {
-        pool.execute(Task::new(id, move|| {
+        pool.execute(Task::new(move|| {
             // sched();
-            println!("Task {}: done", id);
+            println!("Task {} on {}: done", id, Scheduler::id());
+
+            Scheduler::schedule(Task::new(move|| {
+                println!("Inner Task {} on {}: done", id, Scheduler::id());
+            }));
         })).ok().expect("Sending should be OK");
     }
 }
